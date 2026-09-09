@@ -8,7 +8,8 @@ import (
 )
 
 type config struct {
-	Port string `json:"port"`
+	Port    string `json:"port"`
+	MpvPath string `json:"mpvPath,omitempty"`
 }
 
 func configPath() string {
@@ -39,6 +40,13 @@ func loadConfig() config {
 }
 
 func saveConfig(cfg config) error {
-	data, _ := json.MarshalIndent(cfg, "", "  ")
+	existing := loadConfig()
+	if cfg.Port != "" {
+		existing.Port = cfg.Port
+	}
+	if cfg.MpvPath != "" {
+		existing.MpvPath = cfg.MpvPath
+	}
+	data, _ := json.MarshalIndent(existing, "", "  ")
 	return os.WriteFile(configPath(), data, 0644)
 }
