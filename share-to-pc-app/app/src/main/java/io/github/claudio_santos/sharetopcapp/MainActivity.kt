@@ -6,6 +6,7 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -13,10 +14,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -31,7 +34,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
@@ -43,6 +48,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -95,7 +102,9 @@ data class PlayerInfo(
     val playing: Boolean = false,
     val title: String = "",
     val pos: Float = 0f,
-    val duration: Float = 0f
+    val duration: Float = 0f,
+    val speed: Float = 1f,
+    val source: String = "mpv"
 )
 
 data class Track(
@@ -159,7 +168,11 @@ class MainActivity : ComponentActivity() {
                         base = buildBase(),
                         playerInfo = playerInfo,
                         onBack = { screen.value = Screen.Share },
-                        onCommand = ::sendRemoteCommand,
+                        onCommand = { b, c, v ->
+                            val ok = sendRemoteCommand(b, c, v)
+                            if (!ok) toast("Command failed")
+                            ok
+                        },
                         onSetTrack = ::setTrack
                     )
                 }
@@ -193,8 +206,7 @@ class MainActivity : ComponentActivity() {
         if (intent?.action != Intent.ACTION_SEND) return
         val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
         if (text.isNullOrEmpty()) {
-            toast("No text shared")
-            finish()
+            toastThenFinish("No text shared")
             return
         }
         handleShare(text)
@@ -208,8 +220,7 @@ class MainActivity : ComponentActivity() {
         }
         val url = extractUrl(text)
         if (url == null) {
-            toast("No URL found")
-            finish()
+            toastThenFinish("No URL found")
             return
         }
         val mode = prefs.getString("open_mode", "ask") ?: "ask"
@@ -223,12 +234,12 @@ class MainActivity : ComponentActivity() {
     private fun doShare(base: String, url: String, mode: String) {
         Thread {
             val result = postShare(base, url, mode)
-            if (result.mode == "mpv") {
+            if (isDestroyed) return@Thread
+            if (result.mode == "mpv" || result.mode == "browser") {
                 toast(result.message)
-                runOnUiThread { screen.value = Screen.Remote }
+                runOnUiThread { if (!isDestroyed) screen.value = Screen.Remote }
             } else {
-                toast(result.message)
-                finish()
+                toastThenFinish(result.message)
             }
         }.start()
     }
@@ -252,8 +263,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun postShare(base: String, url: String, mode: String): ShareResult {
+        val conn = URL("$base/share").openConnection() as HttpURLConnection
         return try {
-            val conn = URL("$base/share").openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json")
             conn.doOutput = true
@@ -268,10 +279,13 @@ class MainActivity : ComponentActivity() {
                 val message = if (resultMode == "mpv") "Playing on PC" else "Opened in browser"
                 ShareResult(message, resultMode)
             } else {
+                conn.errorStream?.close()
                 ShareResult("Failed: HTTP $code", "error")
             }
         } catch (e: Exception) {
             ShareResult("Failed: ${e.message ?: "connection failed"}", "error")
+        } finally {
+            conn.disconnect()
         }
     }
 
@@ -288,9 +302,18 @@ class MainActivity : ComponentActivity() {
             val reached = withContext(Dispatchers.IO) {
                 try {
                     val conn = URL("$base/api/config").openConnection() as HttpURLConnection
-                    conn.connectTimeout = 5000
-                    conn.readTimeout = 5000
-                    conn.responseCode == 200
+                    try {
+                        conn.connectTimeout = 5000
+                        conn.readTimeout = 5000
+                        if (conn.responseCode == 200) {
+                            true
+                        } else {
+                            conn.errorStream?.close()
+                            false
+                        }
+                    } finally {
+                        conn.disconnect()
+                    }
                 } catch (e: Exception) {
                     false
                 }
@@ -340,8 +363,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendRemoteCommand(base: String, cmd: String, value: Float?): Boolean {
+        val conn = URL("$base/remote/cmd").openConnection() as HttpURLConnection
         return try {
-            val conn = URL("$base/remote/cmd").openConnection() as HttpURLConnection
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json")
             conn.doOutput = true
@@ -353,6 +376,8 @@ class MainActivity : ComponentActivity() {
             conn.responseCode == 200
         } catch (e: Exception) {
             false
+        } finally {
+            conn.disconnect()
         }
     }
 
@@ -360,23 +385,34 @@ class MainActivity : ComponentActivity() {
         Thread {
             val ok = try {
                 val conn = URL("$base/remote/cmd").openConnection() as HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.setRequestProperty("Content-Type", "application/json")
-                conn.doOutput = true
-                conn.connectTimeout = 5000
-                conn.readTimeout = 5000
-                val body = JSONObject()
-                    .put("cmd", "set_track")
-                    .put("type", type)
-                    .put("value", id)
-                    .toString()
-                conn.outputStream.use { it.write(body.toByteArray()) }
-                conn.responseCode == 200
+                try {
+                    conn.requestMethod = "POST"
+                    conn.setRequestProperty("Content-Type", "application/json")
+                    conn.doOutput = true
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 5000
+                    val body = JSONObject()
+                        .put("cmd", "set_track")
+                        .put("type", type)
+                        .put("value", id)
+                        .toString()
+                    conn.outputStream.use { it.write(body.toByteArray()) }
+                    conn.responseCode == 200
+                } finally {
+                    conn.disconnect()
+                }
             } catch (e: Exception) {
                 false
             }
             if (!ok) toast("Track change failed")
         }.start()
+    }
+
+    private fun toastThenFinish(message: String) {
+        Handler(Looper.getMainLooper()).postDelayed({
+            Toast.makeText(applicationContext, message, Toast.LENGTH_SHORT).show()
+            if (!isDestroyed) finish()
+        }, 1000)
     }
 
     private fun toast(message: String) {
@@ -432,6 +468,7 @@ fun ShareScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .padding(24.dp)
+                .verticalScroll(rememberScrollState())
                 .imePadding()
         ) {
             Text(
@@ -497,8 +534,10 @@ fun ShareScreen(
                                     strokeWidth = 2.dp,
                                     color = MaterialTheme.colorScheme.onPrimary
                                 )
+                                Spacer(Modifier.width(8.dp))
+                                Text("Testing...")
                             } else {
-                                Text("Test Connection")
+                                Text("Test")
                             }
                         }
                     }
@@ -511,7 +550,10 @@ fun ShareScreen(
                     )
                     Spacer(Modifier.height(8.dp))
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.horizontalScroll(rememberScrollState())
+                    ) {
                         listOf("ask" to "Ask", "mpv" to "mpv", "browser" to "Browser").forEach { (value, label) ->
                             FilterChip(
                                 selected = openMode == value,
@@ -562,6 +604,7 @@ fun RemoteScreen(
     val tracksLoading = remember { mutableStateOf(false) }
     val tracksVersion = remember { mutableStateOf(0) }
     val showStopConfirm = remember { mutableStateOf(false) }
+    val speedExpanded = remember { mutableStateOf(false) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -574,31 +617,41 @@ fun RemoteScreen(
                             withContext(Dispatchers.IO) {
                                 try {
                                     val conn = URL("$base/api/player").openConnection() as HttpURLConnection
-                                    conn.connectTimeout = 3000
-                                    conn.readTimeout = 3000
-                                    if (conn.responseCode == 200) {
-                                        val json = JSONObject(conn.inputStream.bufferedReader().readText())
-                                        playerInfo.value = PlayerInfo(
-                                            available = json.optBoolean("available", false),
-                                            running = json.optBoolean("running", false),
-                                            playing = json.optBoolean("playing", false),
-                                            title = json.optString("title", ""),
-                                            pos = json.optDouble("pos", 0.0).toFloat(),
-                                            duration = json.optDouble("duration", 0.0).toFloat()
-                                        )
-                                        if (!playerInfo.value.running) {
-                                            pendingSeek.value = null
-                                        } else {
-                                            val target = pendingSeek.value
-                                            if (target != null &&
-                                                (Math.abs(playerInfo.value.pos - target) <= 1.5f ||
-                                                    System.currentTimeMillis() - pendingSeekTime.value > 4000)
-                                            ) {
+                                    try {
+                                        conn.connectTimeout = 3000
+                                        conn.readTimeout = 3000
+                                        if (conn.responseCode == 200) {
+                                            val json = JSONObject(conn.inputStream.bufferedReader().readText())
+                                            playerInfo.value = PlayerInfo(
+                                                available = json.optBoolean("available", false),
+                                                running = json.optBoolean("running", false),
+                                                playing = json.optBoolean("playing", false),
+                                                title = json.optString("title", ""),
+                                                pos = json.optDouble("pos", 0.0).toFloat(),
+                                                duration = json.optDouble("duration", 0.0).toFloat(),
+                                                speed = json.optDouble("speed", 1.0).toFloat(),
+                                                source = json.optString("source", "mpv")
+                                            )
+                                            if (!playerInfo.value.running) {
                                                 pendingSeek.value = null
+                                            } else {
+                                                val target = pendingSeek.value
+                                                if (target != null &&
+                                                    (Math.abs(playerInfo.value.pos - target) <= 1.5f ||
+                                                        System.currentTimeMillis() - pendingSeekTime.value > 4000)
+                                                ) {
+                                                    pendingSeek.value = null
+                                                }
                                             }
+                                        } else {
+                                            conn.errorStream?.close()
                                         }
+                                    } finally {
+                                        conn.disconnect()
                                     }
-                                } catch (_: Exception) {}
+                                } catch (e: Exception) {
+                                    Log.w("ShareToPC", "player polling error", e)
+                                }
                             }
                             delay(1000)
                         }
@@ -644,7 +697,8 @@ fun RemoteScreen(
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     val statusText = when {
-        !info.available -> "Player: mpv not installed on the PC"
+        !info.available ->
+            if (info.source == "browser") "Player: no Chromium browser on the PC" else "Player: mpv not installed on the PC"
         !info.running -> "Player: not running"
         info.playing -> "Playing"
         else -> "Paused"
@@ -657,7 +711,7 @@ fun RemoteScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(24.dp)
+                .padding(horizontal = 16.dp, vertical = 16.dp)
                 .imePadding(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -782,9 +836,11 @@ fun RemoteScreen(
                     enabled = info.running,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Filled.Replay10, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("-10s")
+                    Icon(
+                        Icons.Filled.Replay10,
+                        contentDescription = "Rewind 10 seconds",
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
                 Button(
                     onClick = {
@@ -795,10 +851,9 @@ fun RemoteScreen(
                 ) {
                     Icon(
                         imageVector = if (info.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                        contentDescription = null
+                        contentDescription = if (info.playing) "Pause" else "Play",
+                        modifier = Modifier.size(28.dp)
                     )
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (info.playing) "Pause" else "Play")
                 }
                 OutlinedButton(
                     onClick = {
@@ -807,25 +862,77 @@ fun RemoteScreen(
                     enabled = info.running,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Filled.Forward10, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("+10s")
+                    Icon(
+                        Icons.Filled.Forward10,
+                        contentDescription = "Forward 10 seconds",
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(12.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 OutlinedButton(
-                    onClick = { showTracks.value = true },
+                    onClick = {
+                        Thread { onCommand(base, "fullscreen", null) }.start()
+                    },
                     enabled = info.running,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(0.2f)
                 ) {
-                    Icon(Icons.Filled.Tune, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Tracks")
+                    Icon(
+                        Icons.Filled.Fullscreen,
+                        contentDescription = "Toggle fullscreen",
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Box(modifier = Modifier.weight(0.8f)) {
+                    OutlinedButton(
+                        onClick = { speedExpanded.value = true },
+                        enabled = info.running,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Speed: ${formatSpeed(info.speed)}x")
+                        Spacer(Modifier.width(6.dp))
+                        Icon(Icons.Filled.ArrowDropDown, contentDescription = null)
+                    }
+                    DropdownMenu(
+                        expanded = speedExpanded.value,
+                        onDismissRequest = { speedExpanded.value = false }
+                    ) {
+                        listOf(0.5f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { s ->
+                            DropdownMenuItem(
+                                text = { Text("${formatSpeed(s)}x") },
+                                onClick = {
+                                    speedExpanded.value = false
+                                    Thread { onCommand(base, "set_speed", s) }.start()
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (info.source != "browser") {
+                    OutlinedButton(
+                        onClick = {
+                            showTracks.value = true
+                            tracksLoading.value = true
+                        },
+                        enabled = info.running,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Filled.Tune, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Tracks")
+                    }
                 }
                 OutlinedButton(
                     onClick = { showStopConfirm.value = true },
@@ -1010,6 +1117,11 @@ private fun formatTime(seconds: Float): String {
     else String.format("%d:%02d", m, s)
 }
 
+private fun formatSpeed(speed: Float): String {
+    val s = String.format("%.2f", speed).trimEnd('0').trimEnd('.')
+    return if (s == "1") "1.0" else s
+}
+
 @Composable
 private fun TrackRow(
     label: String,
@@ -1036,11 +1148,12 @@ private fun TrackRow(
 }
 
 private fun fetchTracks(base: String): TracksResult? {
+    val conn = URL("$base/api/tracks").openConnection() as HttpURLConnection
     return try {
-        val conn = URL("$base/api/tracks").openConnection() as HttpURLConnection
         conn.connectTimeout = 5000
         conn.readTimeout = 5000
         if (conn.responseCode != 200) {
+            conn.errorStream?.close()
             null
         } else {
             val json = JSONObject(conn.inputStream.bufferedReader().readText())
@@ -1065,5 +1178,7 @@ private fun fetchTracks(base: String): TracksResult? {
         }
     } catch (e: Exception) {
         null
+    } finally {
+        conn.disconnect()
     }
 }

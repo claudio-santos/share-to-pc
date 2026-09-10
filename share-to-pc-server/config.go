@@ -2,14 +2,16 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 )
 
 type config struct {
-	Port    string `json:"port"`
-	MpvPath string `json:"mpvPath,omitempty"`
+	Port        string `json:"port"`
+	MpvPath     string `json:"mpvPath,omitempty"`
+	BrowserPath string `json:"browserPath,omitempty"`
 }
 
 func configPath() string {
@@ -47,6 +49,12 @@ func saveConfig(cfg config) error {
 	if cfg.MpvPath != "" {
 		existing.MpvPath = cfg.MpvPath
 	}
-	data, _ := json.MarshalIndent(existing, "", "  ")
+	if cfg.BrowserPath != "" {
+		existing.BrowserPath = cfg.BrowserPath
+	}
+	data, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
 	return os.WriteFile(configPath(), data, 0644)
 }

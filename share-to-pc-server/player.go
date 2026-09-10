@@ -21,7 +21,7 @@ const (
 )
 
 var (
-	kernel32               = syscall.NewLazyDLL("kernel32.dll")
+	kernel32                = syscall.NewLazyDLL("kernel32.dll")
 	setNamedPipeHandleState = kernel32.NewProc("SetNamedPipeHandleState")
 	waitNamedPipe           = kernel32.NewProc("WaitNamedPipeW")
 
@@ -294,6 +294,7 @@ type mpvInfoResult struct {
 	Title     string  `json:"title"`
 	Pos       float64 `json:"pos"`
 	Duration  float64 `json:"duration"`
+	Speed     float64 `json:"speed"`
 }
 
 // quitMPV asks mpv to exit and drops the connection without waiting for a
@@ -420,8 +421,8 @@ func mpvTracks() tracksResult {
 				result.Editions = append(result.Editions, e)
 			}
 		}
-		// The quality script does not mark the current edition; match the
-		// active video track's format id (leading token before " - ").
+		// mpv does not mark the selected edition here; match the active video
+		// track's format id (leading token before " - ").
 		if selectedVideoTitle != "" {
 			prefix := selectedVideoTitle
 			if i := strings.Index(prefix, " - "); i >= 0 {
@@ -475,6 +476,11 @@ func mpvInfo() mpvInfoResult {
 	if v, err := executeRawLocked([]any{"get_property", "duration"}); err == nil {
 		if f, ok := v.(float64); ok {
 			info.Duration = f
+		}
+	}
+	if v, err := executeRawLocked([]any{"get_property", "speed"}); err == nil {
+		if f, ok := v.(float64); ok {
+			info.Speed = f
 		}
 	}
 	return info

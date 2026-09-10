@@ -10,13 +10,22 @@ import (
 //go:embed static/index.html
 var indexHTML []byte
 
+//go:embed static/remote.html
+var remoteHTML []byte
+
 func main() {
 	cfg := loadConfig()
+
+	go cdpPollLoop()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(indexHTML)
+	})
+	mux.HandleFunc("GET /remote", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(remoteHTML)
 	})
 	mux.HandleFunc("POST /share", handleShare)
 	mux.HandleFunc("POST /remote/cmd", handleRemoteCmd)

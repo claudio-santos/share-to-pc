@@ -20,7 +20,7 @@ type shareRequest struct {
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	w.Write([]byte(`{"error":"` + msg + `"}`))
+	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 func handleShare(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +43,8 @@ func handleShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// "mpv" and ""/"auto" open in mpv when available; "browser" always uses the browser.
+	// "mpv" and ""/"auto" open in mpv when available; "browser" always uses the
+	// browser player (dedicated CDP window when a Chromium is found).
 	if mode != "browser" && mpvAvailable() {
 		if err := ensureMPV(); err != nil {
 			log.Printf("mpv ensure failed: %v", err)
@@ -55,10 +56,21 @@ func handleShare(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, "mpv failed to load URL")
 			return
 		}
+		setPlayerMode("mpv")
 		log.Printf("Playing in mpv: %s (from %s)", url, r.RemoteAddr)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok","mode":"mpv"}`))
 		return
+	}
+
+	if err := cdpPlay(url); err == nil {
+		setPlayerMode("browser")
+		log.Printf("Playing in browser player: %s (from %s)", url, r.RemoteAddr)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok","mode":"browser"}`))
+		return
+	} else {
+		log.Printf("browser player unavailable, falling back to default browser: %v", err)
 	}
 
 	if err := openInBrowser(url); err != nil {
@@ -66,6 +78,7 @@ func handleShare(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "failed to open in browser")
 		return
 	}
+	setPlayerMode("none")
 	log.Printf("Opened: %s (from %s)", url, r.RemoteAddr)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -115,7 +128,11 @@ func handleQRCode(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL string `json:"url"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "https://") {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "https://") {
 		writeJSONError(w, http.StatusBadRequest, "invalid URL")
 		return
 	}
@@ -138,6 +155,11 @@ func handleRemoteCmd(w http.ResponseWriter, r *http.Request) {
 	var req remoteCmdRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	if getPlayerMode() == "browser" {
+		handleBrowserCmd(w, req)
 		return
 	}
 
@@ -188,6 +210,14 @@ func handleRemoteCmd(w http.ResponseWriter, r *http.Request) {
 			val = 100000
 		}
 		cmd = []any{"set_property", "time-pos", val}
+	case "fullscreen":
+		cmd = []any{"cycle", "fullscreen"}
+	case "set_speed":
+		if req.Value <= 0 {
+			writeJSONError(w, http.StatusBadRequest, "invalid speed")
+			return
+		}
+		cmd = []any{"set_property", "speed", req.Value}
 	case "set_track":
 		prop := map[string]string{"video": "vid", "audio": "aid", "sub": "sid", "edition": "edition"}[req.Type]
 		if prop == "" {
@@ -226,7 +256,6 @@ func handleTracks(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlePlayerStatus(w http.ResponseWriter, r *http.Request) {
-	info := mpvInfo()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+	json.NewEncoder(w).Encode(playerInfo())
 }
